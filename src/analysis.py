@@ -1,6 +1,6 @@
-
 import numpy as np
 import pandas as pd
+import mpmath as mp
 
 from PIL import Image
 from scipy.stats import chi2 as chi2_distribution
@@ -18,6 +18,7 @@ def load_image(path):
 def calculate_mse(original, stego):
     original = original.astype(np.float64)
     stego = stego.astype(np.float64)
+
     return float(np.mean((original - stego) ** 2))
 
 
@@ -69,9 +70,11 @@ def calculate_lsb_distribution(image):
 def calculate_chi_square(image):
     """
     Pair-of-values chi-square test.
+
     Compares frequencies of 2k and 2k+1
     for all 128 pairs of 8-bit values.
     """
+
     values = image.flatten()
     histogram = np.bincount(values, minlength=256)
 
@@ -82,7 +85,9 @@ def calculate_chi_square(image):
         (even_counts, odd_counts)
     ).flatten()
 
-    expected_per_pair = (even_counts + odd_counts) / 2.0
+    expected_per_pair = (
+        even_counts + odd_counts
+    ) / 2.0
 
     expected = np.column_stack(
         (expected_per_pair, expected_per_pair)
@@ -90,37 +95,54 @@ def calculate_chi_square(image):
 
     mask = expected > 0
 
-    if np.count_nonzero(mask) < 2:
+    # One degree of freedom for each non-empty pair.
+    non_empty_pairs = (
+        (even_counts + odd_counts) > 0
+    )
+
+    degrees_of_freedom = int(
+        np.count_nonzero(non_empty_pairs)
+    )
+
+    if degrees_of_freedom == 0:
         return {
             "chi2": float("nan"),
             "p_value": float("nan"),
             "log10_p_value": float("nan")
         }
 
-    number_of_pairs = int(np.count_nonzero(mask))
-
-    statistic = np.sum(
-        (observed[mask] - expected[mask]) ** 2
-        / expected[mask]
+    statistic = float(
+        np.sum(
+            (observed[mask] - expected[mask]) ** 2
+            / expected[mask]
+        )
     )
 
-    degrees_of_freedom = number_of_pairs
+    # High-precision survival function calculation.
+    # p-value = Q(df / 2, chi2 / 2),
+    # where Q is the regularized upper incomplete gamma function.
+    with mp.workdps(80):
+        mp_statistic = mp.mpf(str(statistic))
+        mp_df = mp.mpf(degrees_of_freedom)
 
-    log_p_value = chi2_distribution.logsf(
-        statistic,
-        degrees_of_freedom
-    )
+        p_mp = mp.gammainc(
+            mp_df / 2,
+            mp_statistic / 2,
+            mp.inf,
+            regularized=True
+        )
 
-    log10_p_value = float(log_p_value / np.log(10))
+        log10_p_mp = mp.log10(p_mp)
 
-    p_value = (
-        float(np.exp(log_p_value))
-        if log_p_value > np.log(np.finfo(float).tiny)
-        else 0.0
-    )
+        log10_p_value = float(log10_p_mp)
+
+        # Conversion to float can underflow for extremely small
+        # probabilities. In that case p_value is 0.0, but
+        # log10_p_value remains finite and informative.
+        p_value = float(p_mp)
 
     return {
-        "chi2": float(statistic),
+        "chi2": statistic,
         "p_value": p_value,
         "log10_p_value": log10_p_value
     }
@@ -167,8 +189,13 @@ def analyze_cover(image_path):
         "changed_ratio": 0.0
     }
 
-    result.update(calculate_lsb_distribution(image))
-    result.update(calculate_chi_square(image))
+    result.update(
+        calculate_lsb_distribution(image)
+    )
+
+    result.update(
+        calculate_chi_square(image)
+    )
 
     return result
 
